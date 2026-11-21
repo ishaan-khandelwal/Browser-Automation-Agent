@@ -1,9 +1,7 @@
 'use client';
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence, useAnimation } from 'framer-motion';
-import {
-  Mic, Paperclip, Clock, Send, Sparkles, ArrowRight
-} from 'lucide-react';
+import { Send, Sparkles, ArrowRight } from 'lucide-react';
 
 const EXAMPLES = [
   'Find the cheapest flight from NYC to London next month',
@@ -226,49 +224,7 @@ export default function PromptInput({ onSubmit, isRunning }) {
             gap: 8,
           }}
         >
-          {/* Action buttons */}
-          {[
-            { Icon: Mic, label: 'Voice input', color: '#FF6B6B' },
-            { Icon: Paperclip, label: 'Attach file', color: '#FFB86B' },
-            { Icon: Clock, label: 'History', color: '#9B6DFF' },
-          ].map(({ Icon, label, color }) => (
-            <motion.button
-              key={label}
-              title={label}
-              whileHover={{ scale: 1.12, rotate: 5 }}
-              whileTap={{ scale: 0.92 }}
-              style={{
-                width: 36,
-                height: 36,
-                borderRadius: 10,
-                border: 'none',
-                background: `rgba(${color === '#FF6B6B' ? '255, 107, 107' : color === '#FFB86B' ? '255, 184, 107' : '155, 109, 255'}, 0.08)`,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                color: color,
-              }}
-            >
-              <Icon size={16} />
-            </motion.button>
-          ))}
-
-          {/* Character count */}
-          {value && (
-            <motion.span
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              style={{
-                marginLeft: 4,
-                fontSize: 12,
-                color: '#9b92ae',
-                fontWeight: 500,
-              }}
-            >
-              {value.length}
-            </motion.span>
-          )}
+          <span style={{ fontSize: 11, color: '#6b7688' }}>Your task runs in the active browser session.</span>
 
           {/* Spacer */}
           <div style={{ flex: 1 }} />

@@ -1,9 +1,19 @@
 ﻿'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, ExternalLink, Clock, CheckCircle, AlertCircle, XCircle, Loader2 } from 'lucide-react';
-import { listTasks } from '../lib/api';
+import { listTasks, cancelTask } from '../lib/api';
 import { useAuth } from '../lib/auth-context';
+
+// Statuses a task never leaves. Anything else is still running, queued or
+// waiting on the person, and holds one of their concurrent-task slots.
+const TERMINAL = new Set(['COMPLETED', 'EXECUTION_FAILED', 'REJECTED', 'TIMED_OUT', 'CANCELLED']);
+// How often the list is re-read while any task in it is still active.
+const REFRESH_MS = 10000;
+
+function isActive(session) {
+  return !TERMINAL.has(session.status) && !String(session.id).startsWith('demo-');
+}
 
 const statusConfig = {
   completed: { Icon: CheckCircle, color: '#3DDC97', bg: 'rgba(61, 220, 151, 0.1)', label: 'Completed' },
@@ -46,12 +56,29 @@ function taskIcon(instruction) {
   return '🤖';
 }
 
-function SessionRow({ session, index }) {
+function SessionRow({ session, index, onCancelled }) {
   const [expanded, setExpanded] = useState(false);
   const [hovered, setHovered] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState(null);
   const cfg = statusConfig[STATUS_MAP[session.status] || session.status] || statusConfig.running;
   const { Icon, color, bg, label } = cfg;
   const dur = durationStr(session.createdAt, session.finishedAt);
+
+  // A task left waiting (on a question, an approval, a sign-in) keeps a slot,
+  // and with every slot held no new task can start. This is the way out.
+  const handleCancel = async () => {
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      const updated = await cancelTask(session.id);
+      onCancelled(session.id, updated);
+    } catch (err) {
+      setCancelError(err.message || 'Could not cancel the task');
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   return (
     <motion.div
@@ -106,6 +133,18 @@ function SessionRow({ session, index }) {
                   {session.finalAnswer && <div style={{ fontSize: 12, color: '#5a4d6e', fontWeight: 500 }}>Result: {typeof session.finalAnswer === 'string' ? session.finalAnswer : JSON.stringify(session.finalAnswer)}</div>}
                   {!session.finalAnswer && <div style={{ fontSize: 12, color: '#9b92ae' }}>No result summary available.</div>}
                 </div>
+                {isActive(session) && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <button
+                      disabled={cancelling}
+                      onClick={handleCancel}
+                      style={{ alignSelf: 'flex-start', padding: '6px 14px', borderRadius: 10, border: '1px solid rgba(255, 107, 107, 0.35)', background: 'rgba(255, 107, 107, 0.06)', color: '#FF6B6B', fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, cursor: cancelling ? 'default' : 'pointer', opacity: cancelling ? 0.6 : 1 }}
+                    >
+                      {cancelling ? 'Cancelling…' : '✕ Cancel task'}
+                    </button>
+                    {cancelError && <span style={{ fontSize: 12, color: '#FF6B6B' }}>{cancelError}</span>}
+                  </div>
+                )}
               </div>
             </motion.div>
           )}
@@ -115,30 +154,43 @@ function SessionRow({ session, index }) {
   );
 }
 
-const MOCK_SESSIONS = [
-  { id: 'demo-1', instruction: 'Find cheapest flights NYC → Tokyo', startUrl: 'flights.google.com', status: 'completed', createdAt: new Date(Date.now() - 7200000).toISOString(), stepCount: 12 },
-  { id: 'demo-2', instruction: 'Apply to 5 software internships on LinkedIn', startUrl: 'linkedin.com', status: 'completed', createdAt: new Date(Date.now() - 14400000).toISOString(), stepCount: 31 },
-  { id: 'demo-3', instruction: 'Compare Sony WH-1000XM5 prices on Amazon', startUrl: 'amazon.com', status: 'failed', createdAt: new Date(Date.now() - 86400000).toISOString(), stepCount: 8 },
-];
-
 export default function RecentSessions() {
+  // Null until the first read comes back. Loading and the signed-out demo list
+  // are worked out from it below rather than kept as state of their own.
   const [sessions, setSessions] = useState(null);
-  const [loading, setLoading] = useState(false);
   const { user } = useAuth();
 
-  useEffect(() => {
-    if (!user) { setSessions(MOCK_SESSIONS); return; }
-    setLoading(true);
+  // `quiet` is a background refresh: a failed one keeps what is on screen.
+  const load = useCallback((quiet) => (
     listTasks({ page: 1, pageSize: 10 })
       .then((data) => {
         if (data?.items?.length) setSessions(data.items);
-        else setSessions(MOCK_SESSIONS);
+        else if (!quiet) setSessions([]);
       })
-      .catch(() => setSessions(MOCK_SESSIONS))
-      .finally(() => setLoading(false));
-  }, [user]);
+      .catch(() => { if (!quiet) setSessions([]); })
+  ), []);
 
-  const displayed = sessions || MOCK_SESSIONS;
+  useEffect(() => {
+    if (user) load(false);
+  }, [user, load]);
+
+  // Read once, a "Running" badge stayed "Running" after the task had timed
+  // out. While anything in the list is still active, keep it current.
+  const anyActive = Boolean(user && sessions?.some(isActive));
+  useEffect(() => {
+    if (!anyActive) return undefined;
+    const timer = setInterval(() => load(true), REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [anyActive, load]);
+
+  const handleCancelled = useCallback((id, updated) => {
+    setSessions((prev) => (prev || []).map((s) => (
+      s.id === id ? { ...s, ...(updated || {}), status: updated?.status || 'CANCELLED' } : s
+    )));
+  }, []);
+
+  const loading = Boolean(user) && sessions === null;
+  const displayed = user ? (sessions || []) : [];
 
   return (
     <motion.div
@@ -153,9 +205,6 @@ export default function RecentSessions() {
             {loading ? 'Loading...' : `${displayed.length} automation run${displayed.length !== 1 ? 's' : ''}`}
           </div>
         </div>
-        <button style={{ fontSize: 13, color: '#9B6DFF', fontWeight: 600, background: 'rgba(155, 109, 255, 0.08)', border: 'none', borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontFamily: 'var(--font-sans)' }}>
-          View all →
-        </button>
       </div>
       <div style={{ padding: '8px 8px 8px' }}>
         {loading ? (
@@ -165,7 +214,12 @@ export default function RecentSessions() {
             </motion.div>
           </div>
         ) : (
-          displayed.map((s, i) => <SessionRow key={s.id} session={s} index={i} />)
+          displayed.length ? displayed.map((s, i) => <SessionRow key={s.id} session={s} index={i} onCancelled={handleCancelled} />) : (
+            <div style={{ padding: '28px 16px', textAlign: 'center' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#344054' }}>{user ? 'No runs yet' : 'Sign in to view your runs'}</div>
+              <div style={{ marginTop: 5, fontSize: 12, color: '#6b7688' }}>{user ? 'Your browser automation sessions will appear here.' : 'Your session history is private to your account.'}</div>
+            </div>
+          )
         )}
       </div>
     </motion.div>

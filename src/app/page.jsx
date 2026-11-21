@@ -1,12 +1,10 @@
 ﻿'use client';
 
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { motion, AnimatePresence, useMotionValue, useSpring } from 'framer-motion';
-import dynamic from 'next/dynamic';
+import { motion, AnimatePresence } from 'framer-motion';
 import { createTask, openTaskStream, cancelTask, approveTask, rejectTask } from './lib/api';
 import { useAuth } from './lib/auth-context';
 
-const AuroraBackground = dynamic(() => import('./components/AuroraBackground'), { ssr: false });
 import Sidebar from './components/Sidebar';
 import TopNav from './components/TopNav';
 import HeroSection from './components/HeroSection';
@@ -20,18 +18,46 @@ import ChromeConnectionCard from './components/ChromeConnectionCard';
 import RightPanel from './components/RightPanel';
 import AuthModal from './components/AuthModal';
 
-// ── Confetti ─────────────────────────────────────────────────────────────────
-function spawnConfetti() {
-  const colors = ['#FF6B6B', '#FFB86B', '#9B6DFF', '#3DDC97', '#6EE7C8', '#FFC857'];
-  const container = document.getElementById('confetti-container');
-  if (!container) return;
-  for (let i = 0; i < 40; i++) {
-    const el = document.createElement('div');
-    el.className = 'confetti-piece';
-    el.style.cssText = `left:${Math.random()*100}%;top:${20+Math.random()*20}%;background:${colors[Math.floor(Math.random()*colors.length)]};animation-delay:${Math.random()*0.5}s;width:${6+Math.random()*8}px;height:${6+Math.random()*8}px;`;
-    container.appendChild(el);
-    setTimeout(() => el.remove(), 1800);
-  }
+// A dropped live feed is retried this many times, one second further apart each
+// time, before the page says the connection was lost.
+const MAX_RECONNECTS = 3;
+
+// The agent hands the browser to the person with a `wait` whose target says
+// why (the backend's HANDOFF_* constants). Each gets its own wording: a
+// payment shown as "Sign-in needed" was waved through by someone already
+// signed in, and the booking stopped at the payment page.
+const HANDOFFS = {
+  'for you to pay': {
+    title: '💳 Payment needed: pay in the browser window',
+    approve: "I've paid, continue",
+    reject: 'Stop without paying',
+    border: 'rgba(155, 109, 255, 0.45)',
+    background: 'rgba(155, 109, 255, 0.10)',
+  },
+  'for you to sign in or sign up': {
+    title: '🔑 Sign-in needed',
+    approve: "I've signed in, continue",
+    reject: 'Stop the task',
+  },
+  'for you to fill in details': {
+    title: '📝 Details needed',
+    approve: "I've filled them in, continue",
+    reject: 'Stop the task',
+  },
+};
+
+function handoffFor(approval) {
+  const action = approval.proposedAction || {};
+  const known = action.action === 'wait' ? HANDOFFS[action.target] : null;
+  return {
+    isHandoff: Boolean(known),
+    title: `Approval needed (${approval.riskLevel})`,
+    approve: 'Approve',
+    reject: 'Reject',
+    border: 'rgba(255, 184, 107, 0.5)',
+    background: 'rgba(255, 184, 107, 0.12)',
+    ...(known || {}),
+  };
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────────
@@ -51,22 +77,17 @@ export default function App() {
   const [finalAnswer, setFinalAnswer] = useState(null);
   const [approval, setApproval] = useState(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
+  const [connectionLost, setConnectionLost] = useState(false);
 
   const thinkingInterval = useRef(null);
   const wsRef = useRef(null);
+  // The live feed's bookkeeping. Only a `final` event means the task is over;
+  // a socket closing does not, so these say whether to reconnect and from where.
+  const streamTaskRef = useRef(null);
+  const finishedRef = useRef(false);
+  const lastStepRef = useRef(0);
+  const reconnectsRef = useRef(0);
   const { user } = useAuth();
-
-  // ── Magnetic cursor ──────────────────────────────────────────────────────
-  const cursorX = useMotionValue(-100);
-  const cursorY = useMotionValue(-100);
-  const springCursorX = useSpring(cursorX, { stiffness: 500, damping: 50 });
-  const springCursorY = useSpring(cursorY, { stiffness: 500, damping: 50 });
-
-  useEffect(() => {
-    const handler = (e) => { cursorX.set(e.clientX); cursorY.set(e.clientY); };
-    window.addEventListener('mousemove', handler);
-    return () => window.removeEventListener('mousemove', handler);
-  }, [cursorX, cursorY]);
 
   // ── Cleanup ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -86,6 +107,7 @@ export default function App() {
         setPlan(Array.isArray(event.steps) ? event.steps : null);
         break;
       case 'step': {
+        lastStepRef.current = Math.max(lastStepRef.current, event.stepNumber || 0);
         const label = [event.action, event.target].filter(Boolean).join(' · ');
         const newStep = {
           id: event.stepNumber,
@@ -120,14 +142,15 @@ export default function App() {
         setApproval(null);
         break;
       case 'final':
+        finishedRef.current = true;
         clearInterval(thinkingInterval.current);
         setIsRunning(false);
         setApproval(null);
         if (event.finalAnswer) setFinalAnswer(event.finalAnswer);
-        if (event.status === 'COMPLETED') spawnConfetti();
-        else setTaskError(event.failureReason || `Task ${String(event.status).toLowerCase().replace('_', ' ')}`);
+        if (event.status !== 'COMPLETED') setTaskError(event.failureReason || `Task ${String(event.status).toLowerCase().replace('_', ' ')}`);
         break;
       case 'error':
+        finishedRef.current = true;
         clearInterval(thinkingInterval.current);
         setIsRunning(false);
         setTaskError(event.message || 'Task failed');
@@ -137,10 +160,59 @@ export default function App() {
     }
   }, []);
 
+  // ── Live feed ────────────────────────────────────────────────────────────
+  // A socket that closes before the `final` event is not the task finishing:
+  // the backend restarting or a failed catch-up drops it while the agent works
+  // on. Reconnect, catching up from the last step seen, and only after a few
+  // failures say the connection was lost. Never "Task Completed".
+  const connectStream = useCallback((taskId) => {
+    const live = () => streamTaskRef.current === taskId && !finishedRef.current;
+
+    const retry = () => {
+      if (!live()) return;
+      if (reconnectsRef.current >= MAX_RECONNECTS) {
+        clearInterval(thinkingInterval.current);
+        setIsRunning(false);
+        setConnectionLost(true);
+        return;
+      }
+      reconnectsRef.current += 1;
+      setTimeout(open, 1000 * reconnectsRef.current);
+    };
+
+    async function open() {
+      if (!live()) return;
+      let closed = false;
+      try {
+        wsRef.current = await openTaskStream(taskId, {
+          afterStep: lastStepRef.current,
+          onEvent: (event) => {
+            // The feed is working again; a later drop gets its retries back.
+            reconnectsRef.current = 0;
+            handleWsEvent(event);
+          },
+          // The browser fires both `error` and `close` for one failure.
+          onClose: () => { if (!closed) { closed = true; retry(); } },
+        });
+      } catch {
+        retry();
+      }
+    }
+
+    return open();
+  }, [handleWsEvent]);
+
   // ── Launch agent ─────────────────────────────────────────────────────────
   const handleLaunch = useCallback(async (task) => {
     if (isRunning) return;
     if (!user) { setShowAuthModal(true); return; }
+
+    // Any feed still open belongs to the last task, and must not retry into this one.
+    streamTaskRef.current = null;
+    wsRef.current?.close();
+    finishedRef.current = false;
+    lastStepRef.current = 0;
+    reconnectsRef.current = 0;
 
     setCurrentTask(task);
     setIsRunning(true);
@@ -150,6 +222,7 @@ export default function App() {
     setTaskError(null);
     setFinalAnswer(null);
     setApproval(null);
+    setConnectionLost(false);
     setAgentState({ goal: task, url: null, elements: null, reasoningSteps: null, toolCalls: null });
 
     // Thinking animation
@@ -165,18 +238,9 @@ export default function App() {
 
       if (!taskId) throw new Error('No task ID returned from server');
 
-      // 2. Open WebSocket stream
-      const stream = await openTaskStream(taskId, {
-        onEvent: handleWsEvent,
-        onClose: () => {
-          clearInterval(thinkingInterval.current);
-          setIsRunning((prev) => {
-            if (prev) return false; // only clear if still running (not finished)
-            return prev;
-          });
-        },
-      });
-      wsRef.current = stream;
+      // 2. Open the live feed, which reconnects by itself if it drops.
+      streamTaskRef.current = taskId;
+      await connectStream(taskId);
 
     } catch (err) {
       clearInterval(thinkingInterval.current);
@@ -187,13 +251,14 @@ export default function App() {
         { id: 1, label: 'Could not connect to backend', detail: err.message, status: 'failed', duration: null },
       ]);
     }
-  }, [isRunning, user, handleWsEvent]);
+  }, [isRunning, user, connectStream]);
 
   // ── Cancel task ──────────────────────────────────────────────────────────
   const handleCancel = useCallback(async () => {
     if (currentTaskId) {
       try { await cancelTask(currentTaskId); } catch {}
     }
+    streamTaskRef.current = null; // closing it ourselves is not a drop to retry
     wsRef.current?.close();
     clearInterval(thinkingInterval.current);
     setIsRunning(false);
@@ -212,32 +277,16 @@ export default function App() {
     }
   }, [currentTaskId]);
 
-  const SIDEBAR_W = sidebarExpanded ? 240 : 68;
+  const SIDEBAR_W = sidebarExpanded ? 224 : 68;
   const RIGHT_W = 300;
   const TOP_NAV_H = 68;
 
   return (
     <>
-      {/* Magnetic cursor glow */}
-      <motion.div
-        style={{
-          position: 'fixed', top: 0, left: 0, width: 24, height: 24,
-          borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(155, 109, 255, 0.25) 0%, transparent 80%)',
-          filter: 'blur(8px)', pointerEvents: 'none', zIndex: 9999,
-          x: springCursorX, y: springCursorY, translateX: '-50%', translateY: '-50%',
-        }}
-      />
-
-      {/* Confetti */}
-      <div id="confetti-container" style={{ position: 'fixed', inset: 0, zIndex: 9998, pointerEvents: 'none' }} />
-
       {/* Auth modal */}
       <AnimatePresence>
         {showAuthModal && <AuthModal onClose={() => setShowAuthModal(false)} />}
       </AnimatePresence>
-
-      <AuroraBackground />
 
       <Sidebar
         expanded={sidebarExpanded}
@@ -250,6 +299,7 @@ export default function App() {
 
       {/* Right panel */}
       <motion.aside
+        className="app-inspector"
         animate={{ right: 0, width: RIGHT_W }}
         style={{
           position: 'fixed', top: 0, bottom: 0, right: 0, width: RIGHT_W,
@@ -261,6 +311,7 @@ export default function App() {
 
       {/* Main content */}
       <main
+        className="app-main"
         style={{
           marginLeft: SIDEBAR_W, marginRight: RIGHT_W,
           paddingTop: TOP_NAV_H + 16, paddingLeft: 28, paddingRight: 28,
@@ -285,10 +336,15 @@ export default function App() {
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
                   <div>
                     <h1 style={{ fontSize: 26, fontWeight: 800, color: '#1a1028', letterSpacing: '-0.04em', marginBottom: 4 }}>
-                      {isRunning ? 'Agent Running...' : taskError ? 'Task Failed ✗' : 'Task Completed ✓'}
+                      {isRunning ? 'Agent Running...' : connectionLost ? 'Connection Lost' : taskError ? 'Task Failed ✗' : 'Task Completed ✓'}
                     </h1>
                     {currentTask && <p style={{ fontSize: 14, color: '#9b92ae', fontWeight: 500 }}>&ldquo;{currentTask}&rdquo;</p>}
                     {taskError && <p style={{ fontSize: 13, color: '#FF6B6B', marginTop: 4, fontWeight: 500 }}>{taskError}</p>}
+                    {connectionLost && (
+                      <p style={{ fontSize: 13, color: '#FFB86B', marginTop: 4, fontWeight: 500 }}>
+                        Lost the live connection to the agent. The task may still be running; check Sessions for its status.
+                      </p>
+                    )}
                   </div>
                   <div style={{ display: 'flex', gap: 10 }}>
                     {isRunning && (
@@ -343,21 +399,26 @@ export default function App() {
                   />
                 )}
 
-                {approval && approval.proposedAction?.target !== 'question' && (
-                  <div style={{ padding: 18, borderRadius: 18, border: '1px solid rgba(255, 184, 107, 0.5)', background: 'rgba(255, 184, 107, 0.12)' }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: '#1a1028', marginBottom: 4 }}>
-                      {approval.proposedAction?.action === 'wait' ? 'Sign-in needed' : `Approval needed (${approval.riskLevel})`}
+                {approval && approval.proposedAction?.target !== 'question' && (() => {
+                  const handoff = handoffFor(approval);
+                  return (
+                    <div style={{ padding: 18, borderRadius: 18, border: `1px solid ${handoff.border}`, background: handoff.background }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: '#1a1028', marginBottom: 4 }}>
+                        {handoff.title}
+                      </div>
+                      <div style={{ fontSize: 14, color: '#1a1028', marginBottom: 12, lineHeight: 1.5 }}>
+                        {approval.reason || 'The agent wants to do something irreversible.'}
+                        {!handoff.isHandoff && (
+                          <code style={{ display: 'block', marginTop: 8, fontSize: 12, color: '#5a4d6e' }}>{JSON.stringify(approval.proposedAction)}</code>
+                        )}
+                      </div>
+                      <div style={{ display: 'flex', gap: 10 }}>
+                        <button disabled={approvalBusy} onClick={() => handleDecision(true)} style={{ padding: '8px 18px', borderRadius: 12, border: 'none', background: '#3DDC97', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>{handoff.approve}</button>
+                        <button disabled={approvalBusy} onClick={() => handleDecision(false)} style={{ padding: '8px 18px', borderRadius: 12, border: '1px solid rgba(255,107,107,0.4)', background: 'transparent', color: '#FF6B6B', fontWeight: 600, cursor: 'pointer' }}>{handoff.reject}</button>
+                      </div>
                     </div>
-                    <div style={{ fontSize: 13, color: '#5a4d6e', marginBottom: 12 }}>
-                      {approval.reason || 'The agent wants to do something irreversible.'}{' '}
-                      {approval.proposedAction?.action !== 'wait' && <code>{JSON.stringify(approval.proposedAction)}</code>}
-                    </div>
-                    <div style={{ display: 'flex', gap: 10 }}>
-                      <button disabled={approvalBusy} onClick={() => handleDecision(true)} style={{ padding: '8px 18px', borderRadius: 12, border: 'none', background: '#3DDC97', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>{approval.proposedAction?.action === 'wait' ? "I've signed in, continue" : 'Approve'}</button>
-                      <button disabled={approvalBusy} onClick={() => handleDecision(false)} style={{ padding: '8px 18px', borderRadius: 12, border: '1px solid rgba(255,107,107,0.4)', background: 'transparent', color: '#FF6B6B', fontWeight: 600, cursor: 'pointer' }}>Reject</button>
-                    </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {finalAnswer && (
                   <div style={{ padding: 18, borderRadius: 18, border: '1px solid rgba(61, 220, 151, 0.4)', background: 'rgba(61, 220, 151, 0.08)' }}>
@@ -422,12 +483,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Persistent prompt (when not in agent view) */}
-        {activeView !== 'agent' && (
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }} style={{ marginTop: 32, marginBottom: 32 }}>
-            <PromptInput onSubmit={handleLaunch} isRunning={isRunning} />
-          </motion.div>
-        )}
       </main>
     </>
   );
