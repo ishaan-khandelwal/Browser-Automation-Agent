@@ -1,85 +1,69 @@
 ﻿'use client';
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { ArrowLeft, X, ShieldCheck, CreditCard, KeyRound, PenLine, CheckCircle2, WifiOff, Copy, Check } from 'lucide-react';
 import { createTask, openTaskStream, cancelTask, approveTask, rejectTask } from './lib/api';
 import { useAuth } from './lib/auth-context';
 
+import Scene3D from './components/Scene3D';
 import Sidebar from './components/Sidebar';
 import TopNav from './components/TopNav';
 import HeroSection from './components/HeroSection';
 import PromptInput from './components/PromptInput';
+import LiveBrowser from './components/LiveBrowser';
 import ExecutionTimeline from './components/ExecutionTimeline';
 import QuestionCard from './components/QuestionCard';
+import ApprovalCard from './components/ApprovalCard';
 import AIThinking from './components/AIThinking';
 import StatsCards from './components/StatsCards';
 import RecentSessions from './components/RecentSessions';
-import ChromeConnectionCard from './components/ChromeConnectionCard';
 import RightPanel from './components/RightPanel';
 import AuthModal from './components/AuthModal';
+import Reveal from './components/Reveal';
+import Toasts, { useToasts } from './components/Toasts';
 
 // A dropped live feed is retried this many times, one second further apart each
 // time, before the page says the connection was lost.
 const MAX_RECONNECTS = 3;
 
-// The agent hands the browser to the person with a `wait` whose target says
-// why (the backend's HANDOFF_* constants). Each gets its own wording: a
-// payment shown as "Sign-in needed" was waved through by someone already
-// signed in, and the booking stopped at the payment page.
-const HANDOFFS = {
-  'for you to pay': {
-    title: '💳 Payment needed: pay in the browser window',
-    approve: "I've paid, continue",
-    reject: 'Stop without paying',
-    border: 'rgba(155, 109, 255, 0.45)',
-    background: 'rgba(155, 109, 255, 0.10)',
-  },
-  'for you to sign in or sign up': {
-    title: '🔑 Sign-in needed',
-    approve: "I've signed in, continue",
-    reject: 'Stop the task',
-  },
-  'for you to fill in details': {
-    title: '📝 Details needed',
-    approve: "I've filled them in, continue",
-    reject: 'Stop the task',
-  },
-};
+// Statuses that mean the run is over.
+const TERMINAL = new Set(['COMPLETED', 'EXECUTION_FAILED', 'REJECTED', 'TIMED_OUT', 'CANCELLED']);
 
-function handoffFor(approval) {
-  const action = approval.proposedAction || {};
-  const known = action.action === 'wait' ? HANDOFFS[action.target] : null;
-  return {
-    isHandoff: Boolean(known),
-    title: `Approval needed (${approval.riskLevel})`,
-    approve: 'Approve',
-    reject: 'Reject',
-    border: 'rgba(255, 184, 107, 0.5)',
-    background: 'rgba(255, 184, 107, 0.12)',
-    ...(known || {}),
-  };
+function answerText(finalAnswer) {
+  if (!finalAnswer) return null;
+  if (typeof finalAnswer === 'string') return finalAnswer;
+  return finalAnswer.text || finalAnswer.answer || JSON.stringify(finalAnswer);
 }
 
-// ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const [activeView, setActiveView] = useState('dashboard');
-  const [chromeConnected, setChromeConnected] = useState(true);
   const [isRunning, setIsRunning] = useState(false);
+
+  // Run state, all of it fed by the stream.
   const [steps, setSteps] = useState([]);
+  const [frames, setFrames] = useState([]);
   const [plan, setPlan] = useState(null);
+  const [reasoning, setReasoning] = useState([]);
+  const [status, setStatus] = useState(null);
+  const [stats, setStats] = useState(null);
   const [currentTask, setCurrentTask] = useState('');
   const [currentTaskId, setCurrentTaskId] = useState(null);
-  const [thinkingState, setThinkingState] = useState(0);
-  const [agentState, setAgentState] = useState({ goal: null, url: null, elements: null, reasoningSteps: null, toolCalls: null });
+  const [selectedStep, setSelectedStep] = useState(null);
+  const [agentState, setAgentState] = useState({ goal: null, url: null, elements: null, toolCalls: null, recoveries: 0 });
+
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [taskError, setTaskError] = useState(null);
   const [finalAnswer, setFinalAnswer] = useState(null);
   const [approval, setApproval] = useState(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
+  const [focusNonce, setFocusNonce] = useState(0);
+  const [copied, setCopied] = useState(false);
 
-  const thinkingInterval = useRef(null);
+  const { toasts, push, dismiss } = useToasts();
+
   const wsRef = useRef(null);
   // The live feed's bookkeeping. Only a `final` event means the task is over;
   // a socket closing does not, so these say whether to reconnect and from where.
@@ -89,76 +73,152 @@ export default function App() {
   const reconnectsRef = useRef(0);
   const { user } = useAuth();
 
-  // ── Cleanup ──────────────────────────────────────────────────────────────
-  useEffect(() => {
-    return () => {
-      clearInterval(thinkingInterval.current);
-      wsRef.current?.close();
-    };
-  }, []);
+  useEffect(() => () => { wsRef.current?.close(); }, []);
 
-  // ── Handle WS event ─────────────────────────────────────────────────────
-  // Event shapes are the backend's section 6.1 bodies: status, step, recovery,
-  // approval_required, approval_resolved, final, error. Steps are keyed by
-  // stepNumber; `seq` is 0 on replayed events so it cannot be an identity.
+  // Views differ a lot in height, so keeping the old scroll position can land
+  // you on blank space below a shorter one.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [activeView]);
+
+  // ── Handle one stream event ──────────────────────────────────────────────
+  // Shapes are the backend's documented event bodies: status, plan, step,
+  // recovery, approval_required, approval_resolved, final, error. Steps are
+  // keyed by stepNumber; `seq` is -1 on replayed events so it cannot be an
+  // identity.
   const handleWsEvent = useCallback((event) => {
     switch (event.type) {
+      case 'status':
+        setStatus(event.status);
+        break;
+
       case 'plan':
         setPlan(Array.isArray(event.steps) ? event.steps : null);
         break;
+
       case 'step': {
-        lastStepRef.current = Math.max(lastStepRef.current, event.stepNumber || 0);
-        const label = [event.action, event.target].filter(Boolean).join(' · ');
-        const newStep = {
-          id: event.stepNumber,
-          label: label || `Step ${event.stepNumber}`,
-          detail: event.value || event.url || null,
+        const n = event.stepNumber || 0;
+        lastStepRef.current = Math.max(lastStepRef.current, n);
+
+        // A committed step means it is acting, whatever the last status event
+        // said. Without this the page keeps reading "Planning" while steps
+        // stream in, because the next status event may be some way off.
+        setStatus((s) => (s === 'PLANNING' || s === 'SUBMITTED' ? 'ACTING' : s));
+
+        const next = {
+          id: n,
+          action: event.action,
+          target: event.target || null,
+          value: event.value || null,
+          url: event.url || null,
+          reasoning: event.reasoning || null,
+          verified: event.verified,
+          usedVision: event.usedVision,
+          replayed: event.replayed,
+          confidence: event.confidence,
           status: event.verified === false ? 'error' : 'done',
-          duration: null,
         };
-        setSteps((prev) =>
-          prev.some((s) => s.id === newStep.id)
-            ? prev.map((s) => (s.id === newStep.id ? newStep : s))
-            : [...prev, newStep]
-        );
+
+        setSteps((prev) => {
+          const at = prev.findIndex((s) => s.id === n);
+          if (at === -1) return [...prev, next];
+          const copy = [...prev];
+          copy[at] = { ...prev[at], ...next };
+          return copy;
+        });
+
+        // A replayed step above the screenshot cutover arrives without an
+        // image; keep the frame anyway so the strip has no holes.
+        setFrames((prev) => {
+          const frame = {
+            step: n,
+            action: event.action,
+            target: event.target || null,
+            value: event.value || null,
+            screenshot: event.screenshot || null,
+            bbox: event.bbox || null,
+            viewport: event.viewport || null,
+            url: event.url || null,
+          };
+          const at = prev.findIndex((f) => f.step === n);
+          if (at === -1) return [...prev, frame];
+          const copy = [...prev];
+          copy[at] = frame;
+          return copy;
+        });
+
+        if (event.reasoning) setReasoning((prev) => [...prev, event.reasoning]);
+
         setAgentState((p) => ({
           ...p,
           url: event.url || p.url,
-          reasoningSteps: event.reasoning ? [...(p.reasoningSteps || []), event.reasoning] : p.reasoningSteps,
           toolCalls: [...(p.toolCalls || []), { name: event.action, args: event.target || '' }],
         }));
         break;
       }
-      case 'recovery':
-        setAgentState((p) => ({
-          ...p,
-          reasoningSteps: [...(p.reasoningSteps || []), `Recovery (${event.strategy}): ${event.outcome}`],
-        }));
+
+      case 'recovery': {
+        const label = `${event.strategy} · ${String(event.outcome || '').toLowerCase()}`;
+        setSteps((prev) => prev.map((s) => (
+          s.id === event.stepNumber
+            ? { ...s, recoveries: [...(s.recoveries || []), label] }
+            : s
+        )));
+        setAgentState((p) => ({ ...p, recoveries: (p.recoveries || 0) + 1 }));
+        setReasoning((prev) => [...prev, `Step ${event.stepNumber} did not take. Trying "${event.strategy}" (attempt ${event.attemptNumber}).`]);
         break;
+      }
+
       case 'approval_required':
         setApproval(event);
+        setStatus('AWAITING_APPROVAL');
+        setSteps((prev) => prev.map((s) => (s.id === event.stepNumber ? { ...s, awaiting: true } : s)));
+        // A run can sit here for minutes, so say so even if the tab is not the
+        // one being looked at.
+        push({
+          tone: 'warn',
+          title: 'The agent needs you',
+          body: event.reason || 'It stopped before an action it cannot undo.',
+        });
         break;
+
       case 'approval_resolved':
         setApproval(null);
+        setSteps((prev) => prev.map((s) => ({ ...s, awaiting: false })));
         break;
+
       case 'final':
         finishedRef.current = true;
-        clearInterval(thinkingInterval.current);
         setIsRunning(false);
         setApproval(null);
-        if (event.finalAnswer) setFinalAnswer(event.finalAnswer);
-        if (event.status !== 'COMPLETED') setTaskError(event.failureReason || `Task ${String(event.status).toLowerCase().replace('_', ' ')}`);
+        setStatus(event.status);
+        setStats(event.stats || null);
+        setSteps((prev) => prev.map((s) => ({ ...s, awaiting: false })));
+        if (event.finalAnswer) setFinalAnswer(answerText(event.finalAnswer));
+        if (event.status === 'COMPLETED') {
+          push({
+            tone: 'good',
+            title: 'Task completed',
+            body: answerText(event.finalAnswer) || `${event.stats?.steps ?? 0} steps.`,
+          });
+        } else {
+          const why = event.failureReason || `Task ${String(event.status).toLowerCase().replace(/_/g, ' ')}`;
+          setTaskError(why);
+          push({ tone: 'bad', title: 'The run did not finish', body: why });
+        }
         break;
+
       case 'error':
         finishedRef.current = true;
-        clearInterval(thinkingInterval.current);
         setIsRunning(false);
         setTaskError(event.message || 'Task failed');
+        push({ tone: 'bad', title: 'Stream error', body: event.message || 'Task failed' });
         break;
+
       default:
-        break; // status, heartbeat: nothing to render
+        break; // heartbeat and anything new: nothing to render
     }
-  }, []);
+  }, [push]);
 
   // ── Live feed ────────────────────────────────────────────────────────────
   // A socket that closes before the `final` event is not the task finishing:
@@ -171,7 +231,6 @@ export default function App() {
     const retry = () => {
       if (!live()) return;
       if (reconnectsRef.current >= MAX_RECONNECTS) {
-        clearInterval(thinkingInterval.current);
         setIsRunning(false);
         setConnectionLost(true);
         return;
@@ -202,9 +261,10 @@ export default function App() {
     return open();
   }, [handleWsEvent]);
 
-  // ── Launch agent ─────────────────────────────────────────────────────────
-  const handleLaunch = useCallback(async (task) => {
-    if (isRunning) return;
+  // ── Launch ───────────────────────────────────────────────────────────────
+  const handleLaunch = useCallback(async ({ instruction, startUrl } = {}) => {
+    const task = typeof instruction === 'string' ? instruction : '';
+    if (!task.trim() || isRunning) return;
     if (!user) { setShowAuthModal(true); return; }
 
     // Any feed still open belongs to the last task, and must not retry into this one.
@@ -218,50 +278,41 @@ export default function App() {
     setIsRunning(true);
     setActiveView('agent');
     setSteps([]);
+    setFrames([]);
     setPlan(null);
+    setReasoning([]);
+    setStats(null);
+    setStatus('SUBMITTED');
+    setSelectedStep(null);
     setTaskError(null);
     setFinalAnswer(null);
     setApproval(null);
     setConnectionLost(false);
-    setAgentState({ goal: task, url: null, elements: null, reasoningSteps: null, toolCalls: null });
-
-    // Thinking animation
-    thinkingInterval.current = setInterval(() => {
-      setThinkingState((prev) => (prev + 1) % 6);
-    }, 2500);
+    setAgentState({ goal: task, url: startUrl || null, elements: null, toolCalls: null, recoveries: 0 });
 
     try {
-      // 1. Create task on backend
-      const taskResponse = await createTask({ instruction: task });
+      const taskResponse = await createTask({ instruction: task, startUrl });
       const taskId = taskResponse?.id;
       setCurrentTaskId(taskId);
-
       if (!taskId) throw new Error('No task ID returned from server');
 
-      // 2. Open the live feed, which reconnects by itself if it drops.
       streamTaskRef.current = taskId;
       await connectStream(taskId);
-
     } catch (err) {
-      clearInterval(thinkingInterval.current);
       setIsRunning(false);
-      setTaskError(err.message || 'Failed to start task');
-      // Fallback: show demo steps so UI is not empty
-      setSteps([
-        { id: 1, label: 'Could not connect to backend', detail: err.message, status: 'failed', duration: null },
-      ]);
+      setStatus(null);
+      setTaskError(err.message || 'Could not start the task');
     }
   }, [isRunning, user, connectStream]);
 
-  // ── Cancel task ──────────────────────────────────────────────────────────
   const handleCancel = useCallback(async () => {
     if (currentTaskId) {
-      try { await cancelTask(currentTaskId); } catch {}
+      try { await cancelTask(currentTaskId); } catch { /* the final event still settles it */ }
     }
     streamTaskRef.current = null; // closing it ourselves is not a drop to retry
     wsRef.current?.close();
-    clearInterval(thinkingInterval.current);
     setIsRunning(false);
+    setStatus('CANCELLED');
   }, [currentTaskId]);
 
   const handleDecision = useCallback(async (approve, answer) => {
@@ -277,213 +328,292 @@ export default function App() {
     }
   }, [currentTaskId]);
 
-  const SIDEBAR_W = sidebarExpanded ? 224 : 68;
-  const RIGHT_W = 300;
-  const TOP_NAV_H = 68;
+  const handleNewTask = useCallback(() => {
+    setActiveView('dashboard');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setFocusNonce((n) => n + 1);
+  }, []);
+
+  const copyAnswer = useCallback(async () => {
+    if (!finalAnswer) return;
+    try {
+      await navigator.clipboard.writeText(finalAnswer);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      push({ tone: 'bad', title: 'Could not copy', body: 'Your browser blocked clipboard access.' });
+    }
+  }, [finalAnswer, push]);
+
+  // What the page calls the run right now.
+  const headline = useMemo(() => {
+    if (isRunning) return status === 'AWAITING_APPROVAL' ? 'Waiting for you' : 'Agent running';
+    if (connectionLost) return 'Connection lost';
+    if (taskError) return 'Task failed';
+    if (status && TERMINAL.has(status)) return status === 'COMPLETED' ? 'Task completed' : 'Task stopped';
+    return 'Agent';
+  }, [isRunning, connectionLost, taskError, status]);
+
+  const needsYou = approval ? 1 : 0;
+  const isQuestion = approval?.proposedAction?.target === 'question';
 
   return (
     <>
-      {/* Auth modal */}
+      <Scene3D />
+
       <AnimatePresence>
         {showAuthModal && <AuthModal onClose={() => setShowAuthModal(false)} />}
       </AnimatePresence>
 
-      <Sidebar
-        expanded={sidebarExpanded}
-        onToggle={() => setSidebarExpanded((p) => !p)}
-        activeView={activeView}
-        onViewChange={setActiveView}
-      />
+      <Toasts toasts={toasts} onDismiss={dismiss} />
 
-      <TopNav sidebarExpanded={sidebarExpanded} onLoginClick={() => setShowAuthModal(true)} />
+      <div className="shell">
+        <Sidebar
+          expanded={sidebarExpanded}
+          onToggle={() => setSidebarExpanded((p) => !p)}
+          activeView={activeView}
+          onViewChange={setActiveView}
+          onNewTask={handleNewTask}
+          needsYou={needsYou}
+          isRunning={isRunning}
+        />
 
-      {/* Right panel */}
-      <motion.aside
-        className="app-inspector"
-        animate={{ right: 0, width: RIGHT_W }}
-        style={{
-          position: 'fixed', top: 0, bottom: 0, right: 0, width: RIGHT_W,
-          padding: `${TOP_NAV_H + 20}px 16px 0 0`, zIndex: 80, overflowY: 'auto',
-        }}
-      >
-        <RightPanel agentState={agentState} isRunning={isRunning} />
-      </motion.aside>
+        <TopNav
+          sidebarExpanded={sidebarExpanded}
+          onLoginClick={() => setShowAuthModal(true)}
+          activeView={activeView}
+          onViewChange={setActiveView}
+          isRunning={isRunning}
+          stepsDone={steps.length}
+          stepsTotal={Array.isArray(plan) ? Math.max(plan.length, steps.length) : steps.length}
+        />
 
-      {/* Main content */}
-      <main
-        className="app-main"
-        style={{
-          marginLeft: SIDEBAR_W, marginRight: RIGHT_W,
-          paddingTop: TOP_NAV_H + 16, paddingLeft: 28, paddingRight: 28,
-          minHeight: '100vh', position: 'relative', zIndex: 10,
-          transition: 'margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-        }}
-      >
-        <AnimatePresence mode="wait">
-          {/* ── DASHBOARD ── */}
-          {activeView === 'dashboard' && (
-            <motion.div key="dashboard" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -16 }} transition={{ type: 'spring', stiffness: 280, damping: 26 }}>
-              <HeroSection onLaunch={handleLaunch} />
-              <div style={{ marginTop: 32 }}><StatsCards /></div>
-              <div style={{ marginTop: 24 }}><RecentSessions /></div>
-            </motion.div>
-          )}
+        <main className={`main${sidebarExpanded ? ' rail-open' : ''}`}>
+          <div className="main-inner">
+            <AnimatePresence mode="wait">
 
-          {/* ── AGENT VIEW ── */}
-          {activeView === 'agent' && (
-            <motion.div key="agent" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -16 }} transition={{ type: 'spring', stiffness: 280, damping: 26 }}>
-              <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} style={{ marginBottom: 28 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <div>
-                    <h1 style={{ fontSize: 26, fontWeight: 800, color: '#1a1028', letterSpacing: '-0.04em', marginBottom: 4 }}>
-                      {isRunning ? 'Agent Running...' : connectionLost ? 'Connection Lost' : taskError ? 'Task Failed ✗' : 'Task Completed ✓'}
-                    </h1>
-                    {currentTask && <p style={{ fontSize: 14, color: '#9b92ae', fontWeight: 500 }}>&ldquo;{currentTask}&rdquo;</p>}
-                    {taskError && <p style={{ fontSize: 13, color: '#FF6B6B', marginTop: 4, fontWeight: 500 }}>{taskError}</p>}
-                    {connectionLost && (
-                      <p style={{ fontSize: 13, color: '#FFB86B', marginTop: 4, fontWeight: 500 }}>
-                        Lost the live connection to the agent. The task may still be running; check Sessions for its status.
-                      </p>
-                    )}
-                  </div>
-                  <div style={{ display: 'flex', gap: 10 }}>
-                    {isRunning && (
-                      <motion.button whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.96 }} onClick={handleCancel} style={{ padding: '8px 18px', borderRadius: 12, border: '1px solid rgba(255, 107, 107, 0.3)', background: 'rgba(255, 107, 107, 0.06)', color: '#FF6B6B', fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
-                        ✕ Cancel
-                      </motion.button>
-                    )}
-                    <motion.button whileHover={{ scale: 1.04, y: -1 }} whileTap={{ scale: 0.96 }} onClick={() => setActiveView('dashboard')} style={{ padding: '8px 18px', borderRadius: 12, border: '1px solid rgba(155, 109, 255, 0.2)', background: 'rgba(155, 109, 255, 0.06)', color: '#9B6DFF', fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
-                      ← Back
-                    </motion.button>
-                  </div>
-                </div>
-              </motion.div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                {/* Compact Connection Banner */}
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '10px 18px',
-                    borderRadius: 14,
-                    background: 'rgba(255, 255, 255, 0.65)',
-                    backdropFilter: 'blur(16px)',
-                    border: '1px solid rgba(255, 255, 255, 0.8)',
-                    fontSize: 12,
-                    color: '#5a4d6e',
-                  }}
+              {/* ── OVERVIEW ── */}
+              {activeView === 'dashboard' && (
+                <motion.div
+                  key="dashboard"
+                  initial={{ opacity: 0, y: 14 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -14 }}
+                  transition={{ type: 'spring', stiffness: 280, damping: 26 }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={{ position: 'relative', width: 8, height: 8 }}>
-                      <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: '#3DDC97', opacity: 0.4 }} />
-                      <div style={{ position: 'absolute', inset: 1, borderRadius: '50%', background: '#3DDC97' }} />
+                  <HeroSection onLaunch={handleLaunch} isRunning={isRunning} focusNonce={focusNonce} />
+                  <Reveal style={{ marginTop: 40 }}><StatsCards /></Reveal>
+                  <Reveal delay={80} style={{ marginTop: 20 }}>
+                    <RecentSessions onOpen={() => setActiveView('agent')} />
+                  </Reveal>
+                </motion.div>
+              )}
+
+              {/* ── AGENT ── */}
+              {activeView === 'agent' && (
+                <motion.div
+                  key="agent"
+                  initial={{ opacity: 0, y: 14 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -14 }}
+                  transition={{ type: 'spring', stiffness: 280, damping: 26 }}
+                >
+                  {/* Sticky, so Cancel stays reachable however far you scroll
+                      down a long run. */}
+                  <div className="run-header">
+                    <div className="run-header-main">
+                      <span className="eyebrow">
+                        {currentTaskId ? `Run · ${String(currentTaskId).slice(0, 8)}` : 'No run yet'}
+                        {stats?.steps != null ? ` · ${stats.steps} steps` : ''}
+                        {stats?.durationMs != null ? ` · ${(stats.durationMs / 1000).toFixed(1)}s` : ''}
+                      </span>
+                      <h1>{headline}</h1>
+                      {currentTask && <p className="run-header-task">&ldquo;{currentTask}&rdquo;</p>}
                     </div>
-                    <span style={{ fontWeight: 700, color: '#1a1028' }}>Chromium Browser Connected</span>
-                    <span style={{ color: '#9b92ae' }}>•</span>
-                    <span style={{ color: '#9b92ae' }}>Headful Desktop Mode</span>
+                    <div className="run-actions">
+                      {isRunning ? (
+                        <button type="button" className="btn btn-danger" onClick={handleCancel}>
+                          <X size={15} aria-hidden="true" />Cancel run
+                        </button>
+                      ) : (
+                        <button type="button" className="btn btn-primary" onClick={handleNewTask}>
+                          New task
+                        </button>
+                      )}
+                      <button type="button" className="btn" onClick={() => setActiveView('dashboard')}>
+                        <ArrowLeft size={15} aria-hidden="true" />Overview
+                      </button>
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                    <span style={{ fontSize: 11, color: '#9B6DFF', fontWeight: 600 }}>Gemini 2.5 Flash</span>
-                    <span style={{ fontSize: 11, color: '#3DDC97', fontWeight: 700, background: 'rgba(61,220,151,0.1)', padding: '2px 8px', borderRadius: 999 }}>Active</span>
-                  </div>
-                </div>
 
-                {approval && approval.proposedAction?.target === 'question' && (
-                  <QuestionCard
-                    approval={approval}
-                    busy={approvalBusy}
-                    onAnswer={(text) => handleDecision(true, text)}
-                    onSkip={() => handleDecision(false)}
-                  />
-                )}
-
-                {approval && approval.proposedAction?.target !== 'question' && (() => {
-                  const handoff = handoffFor(approval);
-                  return (
-                    <div style={{ padding: 18, borderRadius: 18, border: `1px solid ${handoff.border}`, background: handoff.background }}>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: '#1a1028', marginBottom: 4 }}>
-                        {handoff.title}
+                  {connectionLost && (
+                    <div className="alert alert-warn" style={{ marginBottom: 16 }}>
+                      <span className="alert-icon"><WifiOff size={20} aria-hidden="true" /></span>
+                      <div className="alert-body">
+                        <p className="alert-title" style={{ color: 'var(--warn-text)' }}>Lost the live connection</p>
+                        <p className="alert-text">
+                          The task may still be running on the server. Open Sessions to see where it got to.
+                        </p>
                       </div>
-                      <div style={{ fontSize: 14, color: '#1a1028', marginBottom: 12, lineHeight: 1.5 }}>
-                        {approval.reason || 'The agent wants to do something irreversible.'}
-                        {!handoff.isHandoff && (
-                          <code style={{ display: 'block', marginTop: 8, fontSize: 12, color: '#5a4d6e' }}>{JSON.stringify(approval.proposedAction)}</code>
-                        )}
-                      </div>
-                      <div style={{ display: 'flex', gap: 10 }}>
-                        <button disabled={approvalBusy} onClick={() => handleDecision(true)} style={{ padding: '8px 18px', borderRadius: 12, border: 'none', background: '#3DDC97', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>{handoff.approve}</button>
-                        <button disabled={approvalBusy} onClick={() => handleDecision(false)} style={{ padding: '8px 18px', borderRadius: 12, border: '1px solid rgba(255,107,107,0.4)', background: 'transparent', color: '#FF6B6B', fontWeight: 600, cursor: 'pointer' }}>{handoff.reject}</button>
+                      <div className="alert-actions">
+                        <button type="button" className="btn btn-ghost-warn" onClick={() => setActiveView('sessions')}>
+                          Open sessions
+                        </button>
                       </div>
                     </div>
-                  );
-                })()}
+                  )}
 
-                {finalAnswer && (
-                  <div style={{ padding: 18, borderRadius: 18, border: '1px solid rgba(61, 220, 151, 0.4)', background: 'rgba(61, 220, 151, 0.08)' }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: '#3DDC97', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Answer</div>
-                    <div style={{ fontSize: 15, color: '#1a1028', fontWeight: 500, whiteSpace: 'pre-wrap' }}>{finalAnswer}</div>
+                  {taskError && !connectionLost && (
+                    <div className="alert alert-bad" style={{ marginBottom: 16 }}>
+                      <span className="alert-icon"><X size={20} aria-hidden="true" /></span>
+                      <div className="alert-body">
+                        <p className="alert-title" style={{ color: 'var(--bad-text)' }}>The run did not finish</p>
+                        <p className="alert-text">{taskError}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="run-grid">
+                    <aside className="run-side">
+                      <ExecutionTimeline
+                        steps={steps}
+                        plan={plan}
+                        isRunning={isRunning}
+                        selectedStep={selectedStep}
+                        onSelect={setSelectedStep}
+                      />
+                    </aside>
+
+                    <div className="run-main">
+                      {/* One selection drives both: picking a step in the
+                          timeline pins the viewer to it, and so does picking a
+                          thumbnail. */}
+                      <LiveBrowser
+                        frames={frames}
+                        isRunning={isRunning}
+                        approval={approval}
+                        pinned={selectedStep}
+                        onPin={setSelectedStep}
+                      />
+
+                      {approval && isQuestion && (
+                        <QuestionCard
+                          approval={approval}
+                          busy={approvalBusy}
+                          onAnswer={(text) => handleDecision(true, text)}
+                          onSkip={() => handleDecision(false)}
+                        />
+                      )}
+
+                      {approval && !isQuestion && (
+                        <ApprovalCard approval={approval} busy={approvalBusy} onDecision={handleDecision} />
+                      )}
+
+                      {finalAnswer && (
+                        <section className="alert alert-good" aria-label="The agent's answer">
+                          <span className="alert-icon"><CheckCircle2 size={20} aria-hidden="true" /></span>
+                          <div className="alert-body">
+                            <div className="eyebrow" style={{ color: 'var(--accent-text)', marginBottom: 6 }}>Answer</div>
+                            <p className="answer-text">{finalAnswer}</p>
+                          </div>
+                          <div className="alert-actions">
+                            <button
+                              type="button"
+                              className={`btn btn-sm${copied ? ' copy-ok' : ''}`}
+                              onClick={copyAnswer}
+                            >
+                              {copied
+                                ? <><Check size={14} aria-hidden="true" />Copied</>
+                                : <><Copy size={14} aria-hidden="true" />Copy</>}
+                            </button>
+                          </div>
+                        </section>
+                      )}
+
+                      {(isRunning || reasoning.length > 0) && (
+                        <AIThinking reasoning={reasoning} status={status} isRunning={isRunning} />
+                      )}
+
+                      <div>
+                        <div className="eyebrow" style={{ marginBottom: 9 }}>
+                          {isRunning ? 'Queue another instruction' : 'Run another task'}
+                        </div>
+                        <PromptInput onSubmit={handleLaunch} isRunning={isRunning} />
+                      </div>
+                    </div>
+
+                    <aside className="run-insp">
+                      <RightPanel agentState={agentState} isRunning={isRunning} stats={stats} status={status} />
+                    </aside>
                   </div>
-                )}
+                </motion.div>
+              )}
 
-                {/* Timeline and Thinking section */}
-                <div style={{ display: 'grid', gridTemplateColumns: isRunning && steps.length > 0 ? '1fr 1.4fr' : '1fr', gap: 20 }}>
-                  <AnimatePresence>
-                    {isRunning && (
-                      <motion.div key="thinking" initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.96 }}>
-                        <AIThinking thinkingState={thinkingState} />
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                  {(steps.length > 0 || plan) && <ExecutionTimeline steps={steps} isRunning={isRunning} plan={plan} />}
-                </div>
-
-                {/* Instruction input below */}
-                <div style={{ marginTop: 8 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#5a4d6e', marginBottom: 8 }}>
-                    {isRunning ? 'Queue Next Instruction' : 'Run Another Task'}
+              {/* ── SESSIONS ── */}
+              {activeView === 'sessions' && (
+                <motion.div
+                  key="sessions"
+                  initial={{ opacity: 0, y: 14 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -14 }}
+                  transition={{ type: 'spring', stiffness: 280, damping: 26 }}
+                >
+                  <div className="section-head">
+                    <div>
+                      <h1 className="disp" style={{ fontSize: 26, fontWeight: 600 }}>Sessions</h1>
+                      <p style={{ fontSize: 14, color: 'var(--text-2)', marginTop: 4 }}>Every task you have run.</p>
+                    </div>
                   </div>
-                  <PromptInput onSubmit={handleLaunch} isRunning={isRunning} />
-                </div>
-              </div>
-            </motion.div>
-          )}
+                  <StatsCards />
+                  <div style={{ marginTop: 20 }}>
+                    <RecentSessions limit={20} onOpen={() => setActiveView('agent')} />
+                  </div>
+                </motion.div>
+              )}
 
-          {/* ── SESSIONS ── */}
-          {activeView === 'sessions' && (
-            <motion.div key="sessions" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -16 }} transition={{ type: 'spring', stiffness: 280, damping: 26 }}>
-              <div style={{ marginBottom: 28 }}>
-                <h1 style={{ fontSize: 26, fontWeight: 800, color: '#1a1028', letterSpacing: '-0.04em', marginBottom: 4 }}>Sessions</h1>
-                <p style={{ fontSize: 14, color: '#9b92ae' }}>All your automation runs</p>
-              </div>
-              <StatsCards />
-              <div style={{ marginTop: 24 }}><RecentSessions /></div>
-            </motion.div>
-          )}
+              {/* ── APPROVAL RULES ── */}
+              {activeView === 'rules' && (
+                <motion.div
+                  key="rules"
+                  initial={{ opacity: 0, y: 14 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -14 }}
+                  transition={{ type: 'spring', stiffness: 280, damping: 26 }}
+                >
+                  <div className="section-head">
+                    <div>
+                      <h1 className="disp" style={{ fontSize: 26, fontWeight: 600 }}>Approval rules</h1>
+                      <p style={{ fontSize: 14, color: 'var(--text-2)', marginTop: 4 }}>
+                        When the agent stops and hands the browser back to you.
+                      </p>
+                    </div>
+                  </div>
 
-          {/* ── HISTORY ── */}
-          {activeView === 'history' && (
-            <motion.div key="history" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -16 }} transition={{ type: 'spring', stiffness: 280, damping: 26 }}>
-              <div style={{ marginBottom: 28 }}>
-                <h1 style={{ fontSize: 26, fontWeight: 800, color: '#1a1028', letterSpacing: '-0.04em', marginBottom: 4 }}>History</h1>
-                <p style={{ fontSize: 14, color: '#9b92ae' }}>Review past automation sessions</p>
-              </div>
-              <RecentSessions />
-            </motion.div>
-          )}
+                  <div className="stat-grid">
+                    {[
+                      { Icon: CreditCard, title: 'Payments', body: 'Anything that spends money stops for you. The agent never types card details.' },
+                      { Icon: KeyRound, title: 'Sign-ins', body: 'Logins and sign-ups are handed to you in the browser window.' },
+                      { Icon: PenLine, title: 'Personal details', body: 'Forms asking for your details wait for you to fill them in.' },
+                      { Icon: ShieldCheck, title: 'Anything irreversible', body: 'Deleting, sending or confirming gets flagged as high risk and asks first.' },
+                    ].map(({ Icon, title, body }) => (
+                      <div key={title} className="stat lift">
+                        <div className="stat-label"><Icon size={15} aria-hidden="true" />{title}</div>
+                        <p style={{ marginTop: 12, fontSize: 14, lineHeight: 1.6, color: 'var(--text-2)' }}>{body}</p>
+                        <div className="stat-sub" style={{ marginTop: 12, color: 'var(--accent-text)' }}>Always on</div>
+                      </div>
+                    ))}
+                  </div>
 
-          {/* ── OTHER ── */}
-          {!['dashboard', 'agent', 'sessions', 'history'].includes(activeView) && (
-            <motion.div key="other" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -16 }} transition={{ type: 'spring', stiffness: 280, damping: 26 }} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 'calc(100vh - 120px)', textAlign: 'center' }}>
-              <motion.div animate={{ y: [0, -10, 0] }} transition={{ duration: 4, repeat: Infinity }} style={{ fontSize: 64, marginBottom: 20 }}>🚀</motion.div>
-              <h2 style={{ fontSize: 22, fontWeight: 700, color: '#1a1028', marginBottom: 8, letterSpacing: '-0.03em' }}>Coming Soon</h2>
-              <p style={{ fontSize: 14, color: '#9b92ae', maxWidth: 300 }}>This section is under development. Check back soon!</p>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-      </main>
+                  <p style={{ marginTop: 20, fontSize: 13, color: 'var(--text-3)' }}>
+                    These rules are enforced by the backend, not by this page, so they hold even if a run is
+                    started from somewhere else.
+                  </p>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </main>
+      </div>
     </>
   );
 }

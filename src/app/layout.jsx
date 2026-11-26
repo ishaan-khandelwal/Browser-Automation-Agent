@@ -1,12 +1,28 @@
-import { Space_Grotesk } from 'next/font/google';
+import { Playfair_Display, Plus_Jakarta_Sans, JetBrains_Mono } from 'next/font/google';
 import Script from 'next/script';
 import './globals.css';
 import { AuthProvider } from './lib/auth-context';
 
-const spaceGrotesk = Space_Grotesk({
+const jakarta = Plus_Jakarta_Sans({
   subsets: ['latin'],
-  variable: '--font-space-grotesk',
-  weight: ['300', '400', '500', '600', '700'],
+  variable: '--font-jakarta',
+  weight: ['400', '500', '600', '700'],
+  display: 'swap',
+});
+
+const playfair = Playfair_Display({
+  subsets: ['latin'],
+  variable: '--font-playfair',
+  weight: ['400', '500', '600'],
+  style: ['normal', 'italic'],
+  display: 'swap',
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-jetbrains-mono',
+  weight: ['400', '500', '600'],
+  display: 'swap',
 });
 
 export const metadata = {
@@ -20,9 +36,19 @@ export const metadata = {
   },
 };
 
+export const viewport = {
+  themeColor: '#f9f8f6',
+  width: 'device-width',
+  initialScale: 1,
+};
+
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={spaceGrotesk.variable} suppressHydrationWarning>
+    <html
+      lang="en"
+      className={`${jakarta.variable} ${playfair.variable} ${jetbrainsMono.variable}`}
+      suppressHydrationWarning
+    >
       <body suppressHydrationWarning>
         {/* Autofill extensions stamp `fdprocessedid` on form controls before React
             hydrates, which trips a hydration mismatch. The fix lives in a static
