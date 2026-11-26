@@ -131,7 +131,8 @@ function SessionRow({ session, index, onCancelled }) {
                 <div style={{ background: 'rgba(26, 16, 40, 0.03)', borderRadius: 12, padding: '12px 14px', border: '1px solid rgba(155, 109, 255, 0.08)' }}>
                   <div style={{ fontSize: 12, color: '#5a4d6e', fontWeight: 500, marginBottom: 4 }}>Task ID: <span style={{ fontFamily: 'monospace', color: '#9b92ae' }}>{session.id}</span></div>
                   {session.finalAnswer && <div style={{ fontSize: 12, color: '#5a4d6e', fontWeight: 500 }}>Result: {typeof session.finalAnswer === 'string' ? session.finalAnswer : JSON.stringify(session.finalAnswer)}</div>}
-                  {!session.finalAnswer && <div style={{ fontSize: 12, color: '#9b92ae' }}>No result summary available.</div>}
+                  {session.failureReason && <div role="status" style={{ fontSize: 12, color: '#c0392b', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>Reason: {session.failureReason}</div>}
+                  {!session.finalAnswer && !session.failureReason && <div style={{ fontSize: 12, color: '#9b92ae' }}>No result summary available.</div>}
                 </div>
                 {isActive(session) && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
