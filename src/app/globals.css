@@ -1049,9 +1049,63 @@ a { color: inherit; }
 
 /* ── run layout ───────────────────────────────────────────────────────────── */
 .run-grid { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
-/* Not sticky: the run header above it already is, and two sticky elements in
-   the same column leave the steps list sitting under the header. */
-.run-side { flex: 1 1 270px; max-width: 320px; min-width: 0; }
+/* The steps column stays put while the run scrolls, and scrolls itself.
+   Without a height of its own, every step the agent took made the page longer
+   and pushed the live browser view further down.
+
+   It sticks just below the run header, which is sticky too. That header wraps
+   to a different height at different widths, so page.jsx measures it into
+   --run-head-h rather than this guessing; the fallback is its one-row height. */
+.run-side {
+  flex: 1 1 270px;
+  max-width: 320px;
+  min-width: 0;
+  position: sticky;
+  top: calc(var(--nav-h) + var(--run-head-h, 104px) + 14px);
+  display: flex;
+  /* Sized to fit both before and after it pins. Until the page scrolls it sits
+     about 26px below its sticky top, in normal flow, so sizing it for the
+     pinned position alone left its bottom edge, and the jump button, just past
+     the fold. */
+  max-height: calc(100vh - var(--nav-h) - var(--run-head-h, 104px) - 46px);
+}
+.steps-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+}
+.steps-panel > .panel-head { flex: none; }
+.steps-scroll {
+  position: relative;          /* offsetTop of a step is measured from here */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain; /* reaching the end does not scroll the page */
+  scrollbar-gutter: stable;
+}
+.steps-jump {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 9999px;
+  background: var(--text);
+  color: #fff;
+  font: 600 12px var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  animation: jumpIn .25s cubic-bezier(.2, .8, .2, 1);
+}
+.steps-jump:hover { background: #2c2c48; }
+@keyframes jumpIn { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 .run-main { flex: 999 1 540px; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 .run-insp { flex: 1 1 280px; max-width: 330px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
 
@@ -1221,7 +1275,9 @@ a { color: inherit; }
 /* ── responsive ───────────────────────────────────────────────────────────── */
 @media (max-width: 1180px) {
   .run-insp { max-width: none; flex-basis: 100%; }
-  .run-side { max-width: none; flex-basis: 100%; }
+  /* Stacked above the browser view here, so pinning it would just be a tall
+     block in the way. It still scrolls inside a capped height. */
+  .run-side { max-width: none; flex-basis: 100%; position: static; max-height: 420px; }
 }
 @media (max-width: 860px) {
   .main { padding-left: 16px; padding-right: 16px; }

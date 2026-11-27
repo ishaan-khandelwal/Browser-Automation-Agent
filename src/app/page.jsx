@@ -75,6 +75,27 @@ export default function App() {
 
   useEffect(() => () => { wsRef.current?.close(); }, []);
 
+  // The steps column sticks just below the run header, which is sticky too and
+  // wraps to a different height at different widths. Measured here, not
+  // guessed in CSS, so the column never slides under it. A callback ref rather
+  // than an effect: the agent view mounts only after the previous view's exit
+  // animation, so an effect keyed on the view would find no header yet.
+  const headObserverRef = useRef(null);
+  const runHeaderRef = useCallback((node) => {
+    headObserverRef.current?.disconnect();
+    headObserverRef.current = null;
+    if (!node || typeof ResizeObserver === 'undefined') return;
+    const scope = node.parentElement;
+    const apply = () => {
+      scope?.style.setProperty('--run-head-h', `${Math.round(node.getBoundingClientRect().height)}px`);
+    };
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(node);
+    headObserverRef.current = observer;
+  }, []);
+  useEffect(() => () => headObserverRef.current?.disconnect(), []);
+
   // Views differ a lot in height, so keeping the old scroll position can land
   // you on blank space below a shorter one.
   useEffect(() => {
@@ -420,7 +441,7 @@ export default function App() {
                 >
                   {/* Sticky, so Cancel stays reachable however far you scroll
                       down a long run. */}
-                  <div className="run-header">
+                  <div className="run-header" ref={runHeaderRef}>
                     <div className="run-header-main">
                       <span className="eyebrow">
                         {currentTaskId ? `Run · ${String(currentTaskId).slice(0, 8)}` : 'No run yet'}
@@ -476,6 +497,9 @@ export default function App() {
                   <div className="run-grid">
                     <aside className="run-side">
                       <ExecutionTimeline
+                        // Keyed on the run, so a new task starts with the list
+                        // following its newest step rather than the last one's.
+                        key={currentTaskId || 'no-run'}
                         steps={steps}
                         plan={plan}
                         isRunning={isRunning}
