@@ -130,6 +130,12 @@ with comments.
 
 Restart `npm run dev` after changing either of them.
 
+For a production build, set both **before** `npm run build`. The build writes
+`BACKEND_URL` into its routing table and `NEXT_PUBLIC_BACKEND_WS_URL` into the
+client code, so changing them on the server afterwards does nothing until you
+build again. On an HTTPS site the WebSocket URL has to be `wss://`, or the
+browser blocks it.
+
 ## Scripts
 
 | Command | What it does |
