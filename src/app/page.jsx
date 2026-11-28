@@ -30,6 +30,11 @@ const MAX_RECONNECTS = 3;
 // Statuses that mean the run is over.
 const TERMINAL = new Set(['COMPLETED', 'EXECUTION_FAILED', 'REJECTED', 'TIMED_OUT', 'CANCELLED']);
 
+// Ends the person chose: declining an approval or a question ends a task as
+// REJECTED, and cancelling as CANCELLED. Reporting those as "Task failed" in red
+// tells someone their own decision was an error.
+const STOPPED_BY_YOU = new Set(['REJECTED', 'CANCELLED']);
+
 function answerText(finalAnswer) {
   if (!finalAnswer) return null;
   if (typeof finalAnswer === 'string') return finalAnswer;
@@ -55,6 +60,8 @@ export default function App() {
 
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [taskError, setTaskError] = useState(null);
+  // Set when the person ended the run themselves: { status, reason }.
+  const [stopped, setStopped] = useState(null);
   const [finalAnswer, setFinalAnswer] = useState(null);
   const [approval, setApproval] = useState(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
@@ -222,6 +229,9 @@ export default function App() {
             title: 'Task completed',
             body: answerText(event.finalAnswer) || `${event.stats?.steps ?? 0} steps.`,
           });
+        } else if (STOPPED_BY_YOU.has(event.status)) {
+          // No toast: they have just pressed the button themselves.
+          setStopped({ status: event.status, reason: event.failureReason || null });
         } else {
           const why = event.failureReason || `Task ${String(event.status).toLowerCase().replace(/_/g, ' ')}`;
           setTaskError(why);
@@ -306,6 +316,7 @@ export default function App() {
     setStatus('SUBMITTED');
     setSelectedStep(null);
     setTaskError(null);
+    setStopped(null);
     setFinalAnswer(null);
     setApproval(null);
     setConnectionLost(false);
@@ -490,6 +501,24 @@ export default function App() {
                       <div className="alert-body">
                         <p className="alert-title" style={{ color: 'var(--bad-text)' }}>The run did not finish</p>
                         <p className="alert-text">{taskError}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {stopped && !connectionLost && (
+                    <div className="alert" style={{ marginBottom: 16 }} role="status">
+                      <span className="alert-icon" style={{ background: 'var(--raised)', color: 'var(--text-2)' }}>
+                        <ShieldCheck size={20} aria-hidden="true" />
+                      </span>
+                      <div className="alert-body">
+                        <p className="alert-title">
+                          {stopped.status === 'REJECTED' ? 'You declined, so the agent stopped' : 'You cancelled this run'}
+                        </p>
+                        <p className="alert-text">
+                          {stopped.status === 'REJECTED' && stopped.reason
+                            ? `It was asking before: ${stopped.reason} Nothing after that was done.`
+                            : 'Nothing further was done on the page.'}
+                        </p>
                       </div>
                     </div>
                   )}

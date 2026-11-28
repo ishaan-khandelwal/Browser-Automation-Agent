@@ -14,7 +14,9 @@ const REFRESH_MS = 10000;
 const BADGES = {
   COMPLETED: { cls: 'pill-good', dot: 'dot-good', label: 'Completed', Icon: CheckCircle2 },
   EXECUTION_FAILED: { cls: 'pill-bad', dot: 'dot-bad', label: 'Failed', Icon: XCircle },
-  REJECTED: { cls: 'pill-bad', dot: 'dot-bad', label: 'Rejected', Icon: XCircle },
+  // REJECTED means you declined an approval or a question: your choice, not a
+  // failure, so it is not shown in red.
+  REJECTED: { cls: 'pill-idle', dot: 'dot-idle', label: 'Declined', Icon: Ban },
   TIMED_OUT: { cls: 'pill-bad', dot: 'dot-bad', label: 'Timed out', Icon: XCircle },
   CANCELLED: { cls: 'pill-idle', dot: 'dot-idle', label: 'Cancelled', Icon: Ban },
   AWAITING_APPROVAL: { cls: 'pill-warn', dot: 'dot-warn', label: 'Needs you', Icon: PauseCircle },
@@ -88,7 +90,12 @@ function Row({ task, index, onCancelled, onOpen }) {
             {dur ? ` · ${dur}` : ''}
           </span>
           {task.failureReason && (
-            <span className="session-meta" style={{ color: 'var(--bad-text)' }}>{task.failureReason}</span>
+            <span
+              className="session-meta"
+              style={{ color: task.status === 'REJECTED' || task.status === 'CANCELLED' ? 'var(--text-3)' : 'var(--bad-text)' }}
+            >
+              {task.failureReason}
+            </span>
           )}
           {answer && !task.failureReason && (
             <span className="session-meta" style={{ color: 'var(--text-2)' }}>{answer}</span>
