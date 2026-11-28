@@ -11,6 +11,21 @@ It is a Next.js app. All the agent work happens in the
 [backend](https://github.com/Abhishek9639/browser-agent-backend), which this app
 talks to over REST and a WebSocket. It has nothing to show without it.
 
+> **Student project.** Built for an OJT programme as part of **AI-07**. It is not
+> a product and has never been deployed. Read the
+> [disclaimer](#disclaimer) before pointing it at a real site.
+
+## Part of three repositories
+
+| Repository | What it is | State |
+|---|---|---|
+| **Browser-Automation-Agent** | This one. The web interface | Built |
+| [browser-agent-backend](https://github.com/Abhishek9639/browser-agent-backend) | The agent, the API, sign-in, task history and the SkyFare demo site | Built |
+| browser-agent-payments | A credits wallet in Razorpay test mode | Not built yet |
+
+This app only ever talks to the backend, through its public REST API and its
+WebSocket stream. It never calls payments directly.
+
 ## What you can do
 
 - **Give the agent a task** in plain language, optionally with a start URL so it
@@ -198,3 +213,19 @@ npm run build
 
 Both should pass. For a UI change, also run a task against SkyFare and check it
 in the browser: the build passing does not mean the page looks right.
+
+## Disclaimer
+
+This is a student project, not a product. In short:
+
+- **Not for real transactions.** The agent stops before payments and hands the
+  browser to you, but it can be wrong, and the approval step is the only thing
+  between a mistake and a purchase.
+- **Only sites that permit automation.** The backend only lets the agent visit
+  the sites on its allow-list. SkyFare exists so that no real site has to be
+  involved.
+- **No real personal data.** Do not type real cards, passwords or other
+  people's details into a run.
+
+The full disclaimer is in the
+[backend README](https://github.com/Abhishek9639/browser-agent-backend#disclaimer).
