@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect } from 'react';
 import { LayoutDashboard, Bot, History, ShieldCheck, Zap, PanelLeft, Plus } from 'lucide-react';
 
 const NAV = [
@@ -8,6 +9,11 @@ const NAV = [
   { id: 'sessions', label: 'Sessions', icon: History },
   { id: 'rules', label: 'Approval rules', icon: ShieldCheck },
 ];
+
+// The same breakpoint as globals.css, where the open rail stops being a column
+// beside the page and becomes a drawer over it.
+const PHONE = '(max-width: 680px)';
+const onPhone = () => typeof window !== 'undefined' && window.matchMedia(PHONE).matches;
 
 export default function Sidebar({
   expanded,
@@ -18,7 +24,29 @@ export default function Sidebar({
   needsYou = 0,
   isRunning,
 }) {
+  // On a phone the drawer covers the page, so choosing where to go also puts
+  // it away. Elsewhere the open rail is a column that can stay open.
+  const thenClose = (go) => () => {
+    go();
+    if (expanded && onPhone()) onToggle();
+  };
+
+  useEffect(() => {
+    if (!expanded) return undefined;
+    const onKey = (e) => {
+      if (e.key === 'Escape' && onPhone()) onToggle();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [expanded, onToggle]);
+
   return (
+    <>
+    {expanded && (
+      // Shown only on phones (globals.css). A real button, so tapping beside
+      // the drawer closes it and a screen reader can find the way out.
+      <button type="button" className="rail-scrim" aria-label="Close navigation" onClick={onToggle} />
+    )}
     <aside className={`rail${expanded ? ' is-open' : ''}`}>
       <button
         type="button"
@@ -35,7 +63,7 @@ export default function Sidebar({
       <button
         type="button"
         className="rail-new"
-        onClick={onNewTask}
+        onClick={thenClose(onNewTask)}
         title={!expanded ? 'New task' : undefined}
       >
         <Plus size={17} strokeWidth={2.6} aria-hidden="true" />
@@ -48,7 +76,7 @@ export default function Sidebar({
             key={id}
             type="button"
             className={`rail-link${activeView === id ? ' is-active' : ''}`}
-            onClick={() => onViewChange(id)}
+            onClick={thenClose(() => onViewChange(id))}
             title={!expanded ? label : undefined}
             aria-current={activeView === id ? 'page' : undefined}
           >
@@ -72,5 +100,6 @@ export default function Sidebar({
         )}
       </div>
     </aside>
+    </>
   );
 }

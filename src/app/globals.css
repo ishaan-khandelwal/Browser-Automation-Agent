@@ -1287,11 +1287,32 @@ a { color: inherit; }
   .run-header { margin-left: -16px; margin-right: -16px; padding-left: 16px; padding-right: 16px; }
   .seg { display: none; }
 }
+/* Outside phones the open rail is a column the page makes room for, so there
+   is nothing to tap away. */
+.rail-scrim { display: none; }
+
 @media (max-width: 680px) {
   :root { --rail-w: 60px; }
-  .rail.is-open { width: 100%; max-width: 240px; box-shadow: var(--shadow-lg); }
+  .rail.is-open { width: 100%; max-width: 260px; box-shadow: var(--shadow-lg); }
+  /* On a phone the open rail is a drawer over the page, not a column beside it.
+     Pushing the page over by the drawer's width left the content 115px wide on
+     a 375px screen. */
+  .main.rail-open { margin-left: var(--rail-w); }
+  .topbar.rail-open { left: var(--rail-w); }
+  .rail-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 65;               /* above the topbar, below the rail */
+    border: 0;
+    padding: 0;
+    background: rgba(26, 26, 46, 0.34);
+    cursor: pointer;
+    animation: scrimIn .2s ease-out;
+  }
   .scene3d-orbit, .scene3d-glow { display: none; }
 }
+@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
