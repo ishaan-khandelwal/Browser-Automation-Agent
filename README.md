@@ -5,7 +5,7 @@ plain words. The agent plans it, drives a real Chromium window, and this app
 shows you every step as it happens: a screenshot of the page, the element the
 agent acted on outlined, and the agent's own reasoning for doing it.
 
-![A finished run: the steps with the agent's reasoning, the page it saw with the clicked element outlined, and the answer](docs/images/live-run.png)
+![The home screen: the task box, example tasks and the steps every run goes through](docs/images/home.png)
 
 It is a Next.js app. All the agent work happens in the
 [backend](https://github.com/Abhishek9639/browser-agent-backend), which this app
@@ -20,7 +20,7 @@ talks to over REST and a WebSocket. It has nothing to show without it.
 | Repository | What it is | State |
 |---|---|---|
 | **Browser-Automation-Agent** | This one. The web interface | Built |
-| [browser-agent-backend](https://github.com/Abhishek9639/browser-agent-backend) | The agent, the API, sign-in, task history and the SkyFare demo site | Built |
+| [browser-agent-backend](https://github.com/Abhishek9639/browser-agent-backend) | The agent, the API, sign-in and task history | Built |
 | browser-agent-payments | A credits wallet in Razorpay test mode | Not built yet |
 
 This app only ever talks to the backend, through its public REST API and its
@@ -48,8 +48,6 @@ WebSocket stream. It never calls payments directly.
   while anything is still running, and lets you cancel a run that is stuck
   waiting. The overview shows your totals, success rate and median run time.
 
-![The home screen with the task box and the example tasks](docs/images/home.png)
-
 ## How it fits together
 
 ```mermaid
@@ -72,7 +70,7 @@ below.
 
 Follow the backend's
 [quick start](https://github.com/Abhishek9639/browser-agent-backend#quick-start).
-Either `make up` (Docker: Postgres, the API and the SkyFare demo site), or
+Either `make up` (Docker: Postgres and the API), or
 `make dev` if you already run Postgres yourself. Then check it answers:
 
 ```bash
@@ -109,20 +107,16 @@ instead.
 Passwords must be at least 10 characters and not only digits. That is the
 backend's rule, and the form checks it before sending.
 
-## Trying it without touching the open web
+## Choosing which sites the agent can use
 
-The backend ships **SkyFare**, a demo flight site built for testing the agent.
-`make up` already serves it; with `make dev`, start it in the backend repo with
-`make skyfare`. Either way it is on `127.0.0.1:8200`.
+The backend only lets the agent visit the sites on its `AGENT_ALLOWED_DOMAINS`
+list, and by default that is this machine alone. Add the sites you want to use,
+comma-separated, in the backend's `.env`, or set it to `*` while you run it
+yourself, then restart the backend.
 
-In the task box, open **Start URL**, enter `http://127.0.0.1:8200/`, and ask
-something like:
-
-> Find the cheapest flight from Delhi to Bengaluru and tell me the fare
-
-The whole run stays on your machine, which makes it a good first test and a fast
-way to check a UI change against real data. To use other sites, the backend's
-`AGENT_ALLOWED_DOMAINS` has to allow them.
+To start a run on a particular page, open **Start URL** in the task box and
+paste the address. Without one the agent starts on a blank page and finds its
+own way.
 
 ## Configuration
 
@@ -211,8 +205,8 @@ npm run lint
 npm run build
 ```
 
-Both should pass. For a UI change, also run a task against SkyFare and check it
-in the browser: the build passing does not mean the page looks right.
+Both should pass. For a UI change, also run a task and check it in the browser:
+the build passing does not mean the page looks right.
 
 ## Disclaimer
 
@@ -222,8 +216,7 @@ This is a student project, not a product. In short:
   browser to you, but it can be wrong, and the approval step is the only thing
   between a mistake and a purchase.
 - **Only sites that permit automation.** The backend only lets the agent visit
-  the sites on its allow-list. SkyFare exists so that no real site has to be
-  involved.
+  the sites on its allow-list. Add only sites whose terms allow automation.
 - **No real personal data.** Do not type real cards, passwords or other
   people's details into a run.
 
