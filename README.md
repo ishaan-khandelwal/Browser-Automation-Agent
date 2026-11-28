@@ -47,6 +47,11 @@ WebSocket stream. It never calls payments directly.
 - **Keep track.** Sessions lists every run with its result, refreshes itself
   while anything is still running, and lets you cancel a run that is stuck
   waiting. The overview shows your totals, success rate and median run time.
+- **Reopen any run.** Click a session to see it again: every step with its
+  screenshot, the outlined element, the reasoning, and the answer or why it
+  stopped. A run that is still going is followed live, so an approval it is
+  waiting for can be answered from any tab. The open run's id stays in the
+  address (`?task=<id>`), so a reload brings it straight back.
 
 ## How it fits together
 

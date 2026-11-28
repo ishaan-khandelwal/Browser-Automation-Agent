@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowLeft, X, ShieldCheck, CreditCard, KeyRound, PenLine, CheckCircle2, WifiOff, Copy, Check } from 'lucide-react';
-import { createTask, openTaskStream, cancelTask, approveTask, rejectTask } from './lib/api';
+import { createTask, getTask, openTaskStream, cancelTask, approveTask, rejectTask } from './lib/api';
 import { useAuth } from './lib/auth-context';
 
 import Scene3D from './components/Scene3D';
@@ -112,9 +112,12 @@ export default function App() {
   // ── Handle one stream event ──────────────────────────────────────────────
   // Shapes are the backend's documented event bodies: status, plan, step,
   // recovery, approval_required, approval_resolved, final, error. Steps are
-  // keyed by stepNumber; `seq` is -1 on replayed events so it cannot be an
-  // identity.
+  // keyed by stepNumber; `seq` is 0 on events replayed from the database (live
+  // ones count up from 1), so it cannot be an identity. It does say whether
+  // this is news: a run opened from Sessions replays its whole history, and
+  // announcing that history with toasts would be noise.
   const handleWsEvent = useCallback((event) => {
+    const replayed = event.seq === 0;
     switch (event.type) {
       case 'status':
         setStatus(event.status);
@@ -202,12 +205,14 @@ export default function App() {
         setStatus('AWAITING_APPROVAL');
         setSteps((prev) => prev.map((s) => (s.id === event.stepNumber ? { ...s, awaiting: true } : s)));
         // A run can sit here for minutes, so say so even if the tab is not the
-        // one being looked at.
-        push({
-          tone: 'warn',
-          title: 'The agent needs you',
-          body: event.reason || 'It stopped before an action it cannot undo.',
-        });
+        // one being looked at. A replayed one is already on screen as the card.
+        if (!replayed) {
+          push({
+            tone: 'warn',
+            title: 'The agent needs you',
+            body: event.reason || 'It stopped before an action it cannot undo.',
+          });
+        }
         break;
 
       case 'approval_resolved':
@@ -224,18 +229,20 @@ export default function App() {
         setSteps((prev) => prev.map((s) => ({ ...s, awaiting: false })));
         if (event.finalAnswer) setFinalAnswer(answerText(event.finalAnswer));
         if (event.status === 'COMPLETED') {
-          push({
-            tone: 'good',
-            title: 'Task completed',
-            body: answerText(event.finalAnswer) || `${event.stats?.steps ?? 0} steps.`,
-          });
+          if (!replayed) {
+            push({
+              tone: 'good',
+              title: 'Task completed',
+              body: answerText(event.finalAnswer) || `${event.stats?.steps ?? 0} steps.`,
+            });
+          }
         } else if (STOPPED_BY_YOU.has(event.status)) {
           // No toast: they have just pressed the button themselves.
           setStopped({ status: event.status, reason: event.failureReason || null });
         } else {
           const why = event.failureReason || `Task ${String(event.status).toLowerCase().replace(/_/g, ' ')}`;
           setTaskError(why);
-          push({ tone: 'bad', title: 'The run did not finish', body: why });
+          if (!replayed) push({ tone: 'bad', title: 'The run did not finish', body: why });
         }
         break;
 
@@ -292,35 +299,65 @@ export default function App() {
     return open();
   }, [handleWsEvent]);
 
-  // ── Launch ───────────────────────────────────────────────────────────────
-  const handleLaunch = useCallback(async ({ instruction, startUrl } = {}) => {
-    const task = typeof instruction === 'string' ? instruction : '';
-    if (!task.trim() || isRunning) return;
-    if (!user) { setShowAuthModal(true); return; }
-
-    // Any feed still open belongs to the last task, and must not retry into this one.
+  // ── Switching runs ───────────────────────────────────────────────────────
+  // Clears everything the last run left on the page and points the agent view
+  // at another one. Any feed still open belongs to the last run, and must not
+  // retry into this one; closing it does not stop that run on the server.
+  const resetRun = useCallback(({ taskId = null, instruction = '', startUrl = null, status: initial, running }) => {
     streamTaskRef.current = null;
     wsRef.current?.close();
     finishedRef.current = false;
     lastStepRef.current = 0;
     reconnectsRef.current = 0;
 
-    setCurrentTask(task);
-    setIsRunning(true);
+    setCurrentTask(instruction);
+    setCurrentTaskId(taskId);
+    setIsRunning(running);
     setActiveView('agent');
     setSteps([]);
     setFrames([]);
     setPlan(null);
     setReasoning([]);
     setStats(null);
-    setStatus('SUBMITTED');
+    setStatus(initial);
     setSelectedStep(null);
     setTaskError(null);
     setStopped(null);
     setFinalAnswer(null);
     setApproval(null);
     setConnectionLost(false);
-    setAgentState({ goal: task, url: startUrl || null, elements: null, toolCalls: null, recoveries: 0 });
+    setAgentState({ goal: instruction || null, url: startUrl, elements: null, toolCalls: null, recoveries: 0 });
+  }, []);
+
+  // ── Open a run from Sessions ─────────────────────────────────────────────
+  // The stream replays everything the run saved, steps and screenshots
+  // included, and then either ends with its result or stays live. So one call
+  // covers a finished run, one still working, and one waiting for an approval
+  // that can now be answered from here, whichever tab started it.
+  const openSession = useCallback(async (task) => {
+    if (!task?.id) return;
+    if (task.id === streamTaskRef.current && !finishedRef.current) {
+      setActiveView('agent'); // already following this one
+      return;
+    }
+    resetRun({
+      taskId: task.id,
+      instruction: task.instruction || '',
+      startUrl: task.startUrl || null,
+      status: task.status || null,
+      running: !TERMINAL.has(task.status),
+    });
+    streamTaskRef.current = task.id;
+    await connectStream(task.id);
+  }, [resetRun, connectStream]);
+
+  // ── Launch ───────────────────────────────────────────────────────────────
+  const handleLaunch = useCallback(async ({ instruction, startUrl } = {}) => {
+    const task = typeof instruction === 'string' ? instruction : '';
+    if (!task.trim() || isRunning) return;
+    if (!user) { setShowAuthModal(true); return; }
+
+    resetRun({ instruction: task, startUrl: startUrl || null, status: 'SUBMITTED', running: true });
 
     try {
       const taskResponse = await createTask({ instruction: task, startUrl });
@@ -335,7 +372,34 @@ export default function App() {
       setStatus(null);
       setTaskError(err.message || 'Could not start the task');
     }
-  }, [isRunning, user, connectStream]);
+  }, [isRunning, user, connectStream, resetRun]);
+
+  // ── The open run survives a reload ───────────────────────────────────────
+  // Its id rides in the address as ?task=<id>. Reloading in the middle of a
+  // run used to drop the live view with nothing to get it back; now the page
+  // reopens the run, replays it and reattaches. Read once on mount, in the
+  // first of these effects (effects run in order), so the sync below cannot
+  // clear it first; acted on once someone is signed in.
+  const pendingTaskRef = useRef(null);
+  useEffect(() => {
+    pendingTaskRef.current = new URLSearchParams(window.location.search).get('task');
+  }, []);
+  useEffect(() => {
+    const id = pendingTaskRef.current;
+    if (!id || !user) return;
+    pendingTaskRef.current = null;
+    getTask(id)
+      .then(openSession)
+      .catch(() => push({ tone: 'bad', title: 'Could not open that run', body: 'It may have been removed, or it belongs to another account.' }));
+  }, [user, openSession, push]);
+
+  useEffect(() => {
+    if (pendingTaskRef.current) return; // a run from the address is still to be opened
+    const url = new URL(window.location.href);
+    if (activeView === 'agent' && currentTaskId) url.searchParams.set('task', currentTaskId);
+    else url.searchParams.delete('task');
+    if (url.href !== window.location.href) window.history.replaceState(null, '', url);
+  }, [activeView, currentTaskId]);
 
   const handleCancel = useCallback(async () => {
     if (currentTaskId) {
@@ -436,7 +500,7 @@ export default function App() {
                   <HeroSection onLaunch={handleLaunch} isRunning={isRunning} focusNonce={focusNonce} />
                   <Reveal style={{ marginTop: 40 }}><StatsCards /></Reveal>
                   <Reveal delay={80} style={{ marginTop: 20 }}>
-                    <RecentSessions onOpen={() => setActiveView('agent')} />
+                    <RecentSessions onOpen={openSession} />
                   </Reveal>
                 </motion.div>
               )}
@@ -619,7 +683,7 @@ export default function App() {
                   </div>
                   <StatsCards />
                   <div style={{ marginTop: 20 }}>
-                    <RecentSessions limit={20} onOpen={() => setActiveView('agent')} />
+                    <RecentSessions limit={20} onOpen={openSession} />
                   </div>
                 </motion.div>
               )}
