@@ -6,9 +6,7 @@
  */
 
 const API = '/api/v1';
-const WS_BASE = (typeof window !== 'undefined')
-  ? window.location.origin.replace(/^http/, 'ws')
-  : 'ws://localhost:3000';
+const UNREACHABLE = "Can't reach the server right now. Please try again in a moment.";
 
 // ── Token store ──────────────────────────────────────────────────────────────
 let _accessToken = null;
@@ -26,11 +24,17 @@ async function apiFetch(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (sentToken) headers['Authorization'] = `Bearer ${sentToken}`;
 
-  const res = await fetch(`${API}${path}`, {
-    ...options,
-    headers,
-    credentials: 'include',
-  });
+  let res;
+  try {
+    res = await fetch(`${API}${path}`, {
+      ...options,
+      headers,
+      credentials: 'include',
+    });
+  } catch {
+    // Offline, or the request got no answer at all.
+    throw new Error(UNREACHABLE);
+  }
 
   // 401 -> refresh once, then retry once.
   if (res.status === 401 && !options._retried && !path.startsWith('/auth/')) {
@@ -41,11 +45,16 @@ async function apiFetch(path, options = {}) {
   }
 
   if (!res.ok) {
-    let msg = `API error ${res.status}`;
+    let msg = null;
     try {
       const b = await res.json();
-      msg = b.error?.message || b.detail || b.message || msg;
+      msg = b.error?.message || b.detail || b.message || null;
     } catch {}
+    // The backend always answers errors in JSON. A 5xx without it came from the
+    // proxy or a gateway in front: the backend is down or restarting.
+    if (typeof msg !== 'string' || !msg) {
+      msg = res.status >= 500 ? UNREACHABLE : `The request failed (${res.status}). Please try again.`;
+    }
     throw new Error(msg);
   }
   if (res.status === 204) return null;
