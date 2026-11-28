@@ -15,6 +15,9 @@ const securityHeaders = [
 
 const nextConfig = {
   reactCompiler: true,
+  // The Docker image sets NEXT_OUTPUT=standalone to get a self-contained server
+  // without node_modules. Off otherwise, so `npm run start` keeps working.
+  output: process.env.NEXT_OUTPUT === 'standalone' ? 'standalone' : undefined,
   // No reason to tell every visitor which framework, and which version, serves this.
   poweredByHeader: false,
   async headers() {

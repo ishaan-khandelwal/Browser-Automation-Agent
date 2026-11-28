@@ -107,6 +107,29 @@ instead.
 Passwords must be at least 10 characters and not only digits. That is the
 backend's rule, and the form checks it before sending.
 
+## Running it with Docker
+
+The `Dockerfile` builds a production image with Next.js's standalone server:
+
+```bash
+docker build -t browseai-frontend \
+  --build-arg BACKEND_URL=https://api.example.com \
+  --build-arg NEXT_PUBLIC_BACKEND_WS_URL=wss://api.example.com .
+```
+
+```bash
+docker run -p 3000:3000 browseai-frontend
+```
+
+`BACKEND_URL` is called from inside the container, so it has to be an address
+the container can reach; `127.0.0.1` there is the container itself.
+`NEXT_PUBLIC_BACKEND_WS_URL` is opened by the visitor's browser. Both are build
+arguments because the build bakes them in, so a different backend means a new
+build.
+
+To run this app, the backend and Postgres together, use the backend's
+[`deploy/docker-compose.full.yml`](https://github.com/Abhishek9639/browser-agent-backend/blob/main/deploy/docker-compose.full.yml).
+
 ## Choosing which sites the agent can use
 
 The backend only lets the agent visit the sites on its `AGENT_ALLOWED_DOMAINS`

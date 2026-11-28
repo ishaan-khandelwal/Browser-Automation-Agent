@@ -1,0 +1,22 @@
+# What the image build never needs. The whole context is sent to the builder
+# before the first step, so node_modules here would be hundreds of megabytes
+# copied for nothing: the image installs its own from the lockfile.
+node_modules
+.next
+out
+coverage
+
+# Local settings and secrets. .env.local points at a developer's own backend;
+# the image takes its URLs as build arguments instead.
+.env*
+!.env.example
+
+# Not part of the app
+.git
+.claude
+docs
+*.md
+Dockerfile
+.dockerignore
+npm-debug.log*
+.DS_Store
